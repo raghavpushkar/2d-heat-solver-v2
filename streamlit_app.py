@@ -8,6 +8,10 @@ Or after `pip install -r requirements.txt`:
 
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless backend; must be set before pyplot is used
+
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
@@ -16,6 +20,13 @@ from src.analytics import analytical_solution_sin, l2_error, relative_l2_error
 from src.boundary import BCConfig
 from src.reaction import ReactionDiffusionSolver, ReactionType
 from src.solvers import CrankNicolson2D, ExplicitEuler2D
+
+# Streamlit Cloud runs a newer matplotlib whose mathtext parser can choke on
+# auto-generated log-scale offset tick labels (e.g. 1e-6). We never need LaTeX
+# in matplotlib figures here (equations are rendered by Streamlit markdown), so
+# disable math parsing entirely to keep tick/label rendering bulletproof.
+plt.rcParams["text.parse_math"] = False
+plt.rcParams["axes.formatter.use_mathtext"] = False
 
 st.set_page_config(
     page_title="2D Heat & Reaction-Diffusion Solver",
