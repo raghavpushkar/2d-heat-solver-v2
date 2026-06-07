@@ -41,7 +41,7 @@ browser. It has four tabs:
   solution, with an error map and a grid-convergence plot.
 - **About** — a short summary of the methods.
 
-**Live demo:** _add your Streamlit Cloud URL here after deploying_
+**Live demo:** [2d-heat-solver-v2.streamlit.app](https://2d-heat-solver-v2.streamlit.app/)
 
 Run it locally:
 
