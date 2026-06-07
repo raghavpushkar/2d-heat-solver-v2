@@ -1,19 +1,16 @@
-"""Interactive Streamlit front-end for the 2D Heat & Reaction-Diffusion solver.
+"""Interactive front-end for the 2D Heat & Reaction-Diffusion solver.
+
+Charts use Plotly so they render in the browser: the time slider scrubs through
+a precomputed solution history client-side, with no server round-trip per move.
 
 Run locally:
-    uv run streamlit run streamlit_app.py
-Or after `pip install -r requirements.txt`:
     streamlit run streamlit_app.py
 """
 
 from __future__ import annotations
 
-import matplotlib
-
-matplotlib.use("Agg")  # headless backend; must be set before pyplot is used
-
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.analytics import analytical_solution_sin, l2_error, relative_l2_error
@@ -21,23 +18,68 @@ from src.boundary import BCConfig
 from src.reaction import ReactionDiffusionSolver, ReactionType
 from src.solvers import CrankNicolson2D, ExplicitEuler2D
 
-# Streamlit Cloud runs a newer matplotlib whose mathtext parser can choke on
-# auto-generated log-scale offset tick labels (e.g. 1e-6). We never need LaTeX
-# in matplotlib figures here (equations are rendered by Streamlit markdown), so
-# disable math parsing entirely to keep tick/label rendering bulletproof.
-plt.rcParams["text.parse_math"] = False
-plt.rcParams["axes.formatter.use_mathtext"] = False
-
 st.set_page_config(
     page_title="2D Heat & Reaction-Diffusion Solver",
-    page_icon="🔥",
     layout="wide",
 )
 
+# --------------------------------------------------------------------------
+# Styling - restrained scientific/editorial look
+# --------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
-# --------------------------------------------------------------------------
-# Initial conditions
-# --------------------------------------------------------------------------
+    html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+
+    .main .block-container {
+        max-width: 1180px;
+        padding-top: 2.2rem;
+        padding-bottom: 3rem;
+    }
+
+    h1, h2, h3 { font-family: 'Source Serif 4', serif; letter-spacing: -0.01em; }
+    h1 { font-weight: 600; font-size: 2.1rem; color: #1a1a1a; }
+    h2 { font-weight: 600; font-size: 1.35rem; color: #1a1a1a; margin-top: 0.5rem; }
+    h3 { font-weight: 600; font-size: 1.08rem; color: #2a2a2a; }
+
+    .stTabs [data-baseweb="tab-list"] { gap: 1.6rem; border-bottom: 1px solid #e6e6e6; }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 0.95rem; font-weight: 500; color: #6b6b6b;
+        padding: 0.4rem 0; background: transparent;
+    }
+    .stTabs [aria-selected="true"] { color: #b5341a; }
+    .stTabs [data-baseweb="tab-highlight"] { background-color: #b5341a; }
+
+    .help-note {
+        font-size: 0.8rem; color: #8a8a8a; line-height: 1.35;
+        margin: -0.4rem 0 0.9rem 0; font-family: 'IBM Plex Sans', sans-serif;
+    }
+
+    .lead { font-size: 0.98rem; color: #444; line-height: 1.55; max-width: 70ch; }
+
+    .metric-mono { font-family: 'IBM Plex Mono', monospace; }
+
+    hr { border-color: #ececec; }
+
+    #MainMenu, footer { visibility: hidden; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+ACCENT = "#b5341a"
+GRID = "#ececec"
+INK = "#1a1a1a"
+HEAT_SCALE = "Inferno"
+PLOT_FONT = "IBM Plex Sans, sans-serif"
+
+
+def help_note(text: str) -> None:
+    st.markdown(f'<div class="help-note">{text}</div>', unsafe_allow_html=True)
+
+
 def ic_sin(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     return np.sin(np.pi * X) * np.sin(np.pi * Y)
 
@@ -46,44 +88,32 @@ def ic_gaussian(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     return np.exp(-((X - 0.5) ** 2 + (Y - 0.5) ** 2) / (2 * 0.1**2))
 
 
-IC_MAP = {"sin(πx)·sin(πy)": ic_sin, "Gaussian hot spot": ic_gaussian}
+IC_MAP = {"Smooth sine bump": ic_sin, "Gaussian hot spot": ic_gaussian}
 
 
-# --------------------------------------------------------------------------
-# Cached solves — heavy work runs once per unique parameter set
-# --------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def run_heat(
-    solver_name: str,
-    nx: int,
-    alpha: float,
-    dt: float,
-    t_total: float,
-    ic_name: str,
-    bc_name: str,
-    bc_val: float,
-):
+def run_heat(solver_name, nx, alpha, dt, t_total, ic_name, bc_name, bc_val):
     ic = IC_MAP[ic_name]
     bc = (
         BCConfig.dirichlet_all(bc_val)
-        if bc_name == "Dirichlet"
+        if bc_name == "Fixed edges (Dirichlet)"
         else BCConfig.neumann_all()
     )
     cls = ExplicitEuler2D if solver_name == "Explicit Euler" else CrankNicolson2D
     solver = cls(nx=nx, ny=nx, alpha=alpha, bc=bc)
-    result = solver.solve(ic, dt=dt, t_total=t_total, record_every=1)
+    result = solver.solve(ic, dt=dt, t_total=t_total, record_every=2)
     rx = alpha * dt / solver.dx**2
     return (
-        result.u_history,
-        result.times,
+        np.array(result.u_history),
+        np.array(result.times),
         result.grid_x,
         result.grid_y,
-        2 * rx,  # rx + ry on a square grid
+        2 * rx,
     )
 
 
 @st.cache_data(show_spinner=False)
-def run_convergence(alpha: float, dt: float, t_total: float):
+def run_convergence(alpha, dt, t_total):
     grids = [20, 30, 40, 50, 60, 80]
     errors = []
     for g in grids:
@@ -96,28 +126,28 @@ def run_convergence(alpha: float, dt: float, t_total: float):
 
 
 @st.cache_data(show_spinner=False)
-def run_reaction(
-    reaction: str,
-    nx: int,
-    F: float,
-    k: float,
-    Du: float,
-    Dv: float,
-    t_total: float,
-    dt: float,
-):
-    L = 2.5
+def run_validation(alpha, nx, dt, t_total):
+    s = CrankNicolson2D(nx=nx, ny=nx, alpha=alpha, bc=BCConfig.dirichlet_all(0.0))
+    r = s.solve(ic_sin, dt=dt, t_total=t_total)
+    X, Y = np.meshgrid(r.grid_x, r.grid_y, indexing="ij")
+    exact = analytical_solution_sin(X, Y, t=t_total, alpha=alpha)
+    return r.u, exact, r.grid_x, r.grid_y, relative_l2_error(r.u, exact)
+
+
+@st.cache_data(show_spinner=False)
+def run_reaction(reaction, nx, F, k, Du, Dv, t_total, dt):
+    length = 2.5
     np.random.seed(0)
 
     def ic_u(X, Y):
         u = np.ones_like(X)
-        c = (np.abs(X - L / 2) < 0.08) & (np.abs(Y - L / 2) < 0.08)
+        c = (np.abs(X - length / 2) < 0.08) & (np.abs(Y - length / 2) < 0.08)
         u[c] = 0.5
         return u + 0.01 * np.random.random(X.shape)
 
     def ic_v(X, Y):
         v = np.zeros_like(X)
-        c = (np.abs(X - L / 2) < 0.08) & (np.abs(Y - L / 2) < 0.08)
+        c = (np.abs(X - length / 2) < 0.08) & (np.abs(Y - length / 2) < 0.08)
         v[c] = 0.25
         return v + 0.01 * np.random.random(X.shape)
 
@@ -125,7 +155,7 @@ def run_reaction(
         ReactionType.GRAY_SCOTT if reaction == "Gray-Scott" else ReactionType.FISHER_KPP
     )
     solver = ReactionDiffusionSolver(
-        nx=nx, ny=nx, Lx=L, Ly=L, reaction_type=rtype,
+        nx=nx, ny=nx, Lx=length, Ly=length, reaction_type=rtype,
         F=F, k=k, Du=Du, Dv=Dv, D=Du, r=1.0,
     )
     result = solver.solve(
@@ -134,292 +164,356 @@ def run_reaction(
         record_every=max(1, int(t_total / dt) // 60),
     )
     field = result.v if result.v is not None else result.u
-    dx = L / (nx - 1)
-    cfl = 2 * Du * (dt / 2) / dx**2
-    return field, result.grid_x, result.grid_y, cfl
+    dx = length / (nx - 1)
+    return field, result.grid_x, result.grid_y, 2 * Du * (dt / 2) / dx**2
 
 
-def heatmap_fig(u, x, y, vmin, vmax, cmap="hot", title=""):
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    im = ax.pcolormesh(x, y, u.T, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_aspect("equal")
-    ax.set_title(title)
-    fig.colorbar(im, ax=ax)
-    fig.tight_layout()
+def base_layout(fig, height=440, title=None):
+    fig.update_layout(
+        height=height,
+        margin=dict(l=10, r=10, t=40 if title else 16, b=10),
+        font=dict(family=PLOT_FONT, size=13, color=INK),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        title=dict(text=title, font=dict(size=15)) if title else None,
+    )
     return fig
 
 
-# --------------------------------------------------------------------------
-# Header
-# --------------------------------------------------------------------------
-st.title("🔥 2D Heat & Reaction-Diffusion PDE Solver")
+def heat_figure(u, x, y, zmin, zmax, colorscale=HEAT_SCALE, height=440, title=None):
+    fig = go.Figure(
+        go.Heatmap(
+            z=u.T, x=x, y=y, zmin=zmin, zmax=zmax, colorscale=colorscale,
+            colorbar=dict(thickness=12, outlinewidth=0, len=0.9),
+            hovertemplate="x=%{x:.2f}, y=%{y:.2f}<br>value=%{z:.3f}<extra></extra>",
+        )
+    )
+    fig.update_xaxes(title="x", showgrid=False, constrain="domain")
+    fig.update_yaxes(title="y", showgrid=False, scaleanchor="x", scaleratio=1)
+    return base_layout(fig, height=height, title=title)
+
+
+st.title("2D Heat & Reaction-Diffusion Solver")
 st.markdown(
-    "Interactive finite-difference solver for the 2D heat equation "
-    "$\\partial_t u = \\alpha \\nabla^2 u$ and reaction-diffusion systems. "
-    "Implements **Explicit Euler (FTCS)** and **Crank-Nicolson** schemes with "
-    "analytical validation. Use the sliders to explore how the methods behave."
+    '<p class="lead">A finite-difference solver for heat flow and pattern-forming '
+    "chemical systems in two dimensions. It implements two time-stepping schemes "
+    "(explicit Euler and Crank-Nicolson), is validated against an exact solution, "
+    "and is built from scratch in NumPy and SciPy. Use the controls to explore how "
+    "the numerical methods behave.</p>",
+    unsafe_allow_html=True,
 )
+st.write("")
 
 tab_heat, tab_compare, tab_valid, tab_react, tab_about = st.tabs(
-    ["Heat Diffusion", "Method Comparison", "Validation", "Reaction-Diffusion", "About"]
+    ["Heat flow", "Method comparison", "Validation", "Pattern formation", "About"]
 )
 
 
-# --------------------------------------------------------------------------
-# Tab 1 — Heat diffusion with a time slider
-# --------------------------------------------------------------------------
 with tab_heat:
-    st.subheader("Watch heat diffuse over time")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        solver_name = st.selectbox(
-            "Scheme", ["Crank-Nicolson", "Explicit Euler"], key="h_solver"
+    st.subheader("How heat spreads over time")
+    st.markdown(
+        '<p class="lead">A region starts hot in the middle and cools as heat '
+        "spreads outward. Set up the scenario on the left, then drag the time "
+        "slider to watch it evolve.</p>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    left, right = st.columns([1, 1.9], gap="large")
+    with left:
+        solver_name = st.selectbox("Numerical scheme", ["Crank-Nicolson", "Explicit Euler"])
+        help_note(
+            "The recipe for stepping forward in time. Crank-Nicolson is stable at "
+            "any step size; Explicit Euler is simpler but can break down (see the "
+            "comparison tab)."
         )
-        ic_name = st.selectbox("Initial condition", list(IC_MAP), key="h_ic")
-        bc_name = st.selectbox("Boundary condition", ["Dirichlet", "Neumann"], key="h_bc")
+
+        ic_name = st.selectbox("Starting heat pattern", list(IC_MAP))
+        help_note(
+            "The temperature at the start. A Gaussian is a single concentrated "
+            "hot spot; the sine bump is a smooth mound filling the square."
+        )
+
+        bc_name = st.selectbox(
+            "Edge behaviour", ["Fixed edges (Dirichlet)", "Insulated edges (Neumann)"]
+        )
+        help_note(
+            "What happens at the walls. Fixed edges are held at a set temperature, "
+            "so heat escapes. Insulated edges let no heat out, so it spreads "
+            "inward and evens out."
+        )
+
         bc_val = 0.0
-        if bc_name == "Dirichlet":
-            bc_val = st.slider("Dirichlet edge value", 0.0, 1.0, 0.0, 0.05, key="h_bcval")
-        alpha = st.slider("Diffusivity α", 0.001, 0.1, 0.02, 0.001, key="h_alpha")
-        nx = st.slider("Grid size (nx = ny)", 20, 100, 60, 5, key="h_nx")
-        dt = st.select_slider(
-            "Time step Δt",
-            options=[0.0005, 0.001, 0.002, 0.005, 0.01],
-            value=0.001,
-            key="h_dt",
+        if bc_name == "Fixed edges (Dirichlet)":
+            bc_val = st.slider("Edge temperature", 0.0, 1.0, 0.0, 0.05)
+            help_note("The temperature the walls are held at. Zero means cold walls.")
+
+        alpha = st.slider("Diffusivity", 0.001, 0.1, 0.02, 0.001, format="%.3f")
+        help_note(
+            "How fast heat conducts through the material. Higher means it spreads "
+            "and evens out more quickly."
         )
-        t_total = st.slider("Total time", 0.05, 1.0, 0.4, 0.05, key="h_ttot")
+
+        nx = st.slider("Grid resolution", 20, 100, 60, 5)
+        help_note(
+            "How finely the square is divided. More points give a sharper picture "
+            "but take longer to compute."
+        )
 
     hist, times, gx, gy, cfl = run_heat(
-        solver_name, nx, alpha, dt, t_total, ic_name, bc_name, bc_val
+        solver_name, nx, alpha, 0.001, 0.4, ic_name, bc_name, bc_val
     )
 
-    if solver_name == "Explicit Euler" and cfl > 0.5:
-        st.warning(
-            f"CFL number rx + ry = {cfl:.3f} > 0.5. Explicit Euler is unstable "
-            "here — expect the solution to blow up. Try a smaller Δt, a coarser "
-            "grid, or switch to Crank-Nicolson (unconditionally stable)."
+    with right:
+        n_frames = len(hist)
+        frame = st.slider("Time", 0, n_frames - 1, n_frames - 1, format="")
+        help_note(
+            f"Simulated time t = {times[frame]:.3f}. Drag to move through the "
+            "evolution from start to finish."
         )
 
-    with c2:
-        frame = st.slider(
-            "Time", 0, len(hist) - 1, len(hist) - 1,
-            format="step %d", key="h_frame",
-        )
-        st.caption(f"t = {times[frame]:.4f}  (frame {frame + 1} of {len(hist)})")
-        vmax = max(1e-9, float(np.nanmax(hist[0])))
-        fig = heatmap_fig(
-            hist[frame], gx, gy, vmin=0.0, vmax=vmax,
-            title=f"{solver_name} — {ic_name}",
-        )
-        st.pyplot(fig)
-        plt.close(fig)
+        if solver_name == "Explicit Euler" and cfl > 0.5:
+            st.warning(
+                f"This combination is numerically unstable (stability number "
+                f"{cfl:.2f}, must stay under 0.5). The result will diverge - see "
+                "the comparison tab for why."
+            )
 
-    st.info(
-        "**What to notice:** with Dirichlet (fixed) edges the total heat leaks "
-        "away and the field decays to zero. With Neumann (insulated) edges no "
-        "heat escapes, so the field flattens toward a uniform average instead."
-    )
+        zmax = max(1e-9, float(np.nanmax(hist[0])))
+        fig = heat_figure(hist[frame], gx, gy, 0.0, zmax, height=460)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-
-# --------------------------------------------------------------------------
-# Tab 2 — Euler vs CN side by side, including the CFL blow-up
-# --------------------------------------------------------------------------
-with tab_compare:
-    st.subheader("Explicit Euler vs Crank-Nicolson")
     st.markdown(
-        "Both schemes agree at small Δt. Push Δt past the CFL limit and Explicit "
-        "Euler blows up while Crank-Nicolson stays stable — the central reason to "
-        "prefer an implicit scheme."
+        '<p class="lead"><strong>What to look for:</strong> with fixed edges the '
+        "heat steadily drains away and the whole region cools toward the edge "
+        "temperature. With insulated edges nothing escapes, so the hot spot "
+        "spreads out until the temperature is nearly uniform.</p>",
+        unsafe_allow_html=True,
     )
-    cc1, cc2 = st.columns([1, 2])
-    with cc1:
-        alpha_c = st.slider("Diffusivity α", 0.001, 0.1, 0.01, 0.001, key="c_alpha")
-        nx_c = st.slider("Grid size", 20, 80, 40, 5, key="c_nx")
+
+
+with tab_compare:
+    st.subheader("Why the choice of scheme matters")
+    st.markdown(
+        '<p class="lead">Both schemes solve the same equation and agree when the '
+        "time step is small. But push the time step too large and the simpler "
+        "Explicit Euler scheme becomes unstable and blows up, while Crank-Nicolson "
+        "stays accurate. This is the central reason to use an implicit method.</p>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    left, right = st.columns([1, 1.9], gap="large")
+    with left:
+        alpha_c = st.slider("Diffusivity", 0.001, 0.1, 0.01, 0.001, format="%.3f", key="c_a")
+        help_note("How fast heat conducts. Affects the stability threshold below.")
+
+        nx_c = st.slider("Grid resolution", 20, 80, 40, 5, key="c_nx")
+        help_note("Finer grids are more sensitive and destabilise at smaller time steps.")
+
         dt_c = st.select_slider(
-            "Time step Δt",
+            "Time step size",
             options=[0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.03],
-            value=0.001,
-            key="c_dt",
+            value=0.001, key="c_dt",
         )
+        help_note(
+            "How far each step jumps forward in time. Larger is faster but riskier "
+            "for Explicit Euler. Increase it and watch the left panel break."
+        )
+
         t_c = st.slider("Total time", 0.02, 0.3, 0.05, 0.01, key="c_t")
+        help_note("How long to simulate in total.")
+
         dx_c = 1.0 / (nx_c - 1)
         cfl_c = 2 * alpha_c * dt_c / dx_c**2
-        st.metric("CFL number (rx + ry)", f"{cfl_c:.3f}", "stable" if cfl_c <= 0.5 else "UNSTABLE")
+        status = "stable" if cfl_c <= 0.5 else "UNSTABLE"
+        color = "#2e7d32" if cfl_c <= 0.5 else ACCENT
+        st.markdown(
+            f'<p class="metric-mono" style="font-size:0.9rem;color:{color};">'
+            f"Stability number: {cfl_c:.2f} &nbsp;({status})</p>",
+            unsafe_allow_html=True,
+        )
+        help_note(
+            "Explicit Euler is only stable when this stays at or below 0.50. "
+            "Crank-Nicolson has no such limit."
+        )
 
-    he, te, xe, ye, _ = run_heat(
-        "Explicit Euler", nx_c, alpha_c, dt_c, t_c, "sin(πx)·sin(πy)", "Dirichlet", 0.0
+    he, _, xe, ye, _ = run_heat(
+        "Explicit Euler", nx_c, alpha_c, dt_c, t_c, "Smooth sine bump",
+        "Fixed edges (Dirichlet)", 0.0,
     )
-    hc, tc, xc, yc, _ = run_heat(
-        "Crank-Nicolson", nx_c, alpha_c, dt_c, t_c, "sin(πx)·sin(πy)", "Dirichlet", 0.0
+    hc, _, xc, yc, _ = run_heat(
+        "Crank-Nicolson", nx_c, alpha_c, dt_c, t_c, "Smooth sine bump",
+        "Fixed edges (Dirichlet)", 0.0,
     )
 
-    with cc2:
-        g1, g2 = st.columns(2)
+    with right:
         eul_max = float(np.nanmax(np.abs(he[-1])))
-        vmax_e = 1.0 if eul_max > 10 else max(1e-9, eul_max)
+        zmax_e = 1.0 if eul_max > 10 else max(1e-9, eul_max)
+        g1, g2 = st.columns(2, gap="medium")
         with g1:
-            st.caption("Explicit Euler (final state)")
-            fe = heatmap_fig(he[-1], xe, ye, 0.0, vmax_e)
-            st.pyplot(fe)
-            plt.close(fe)
+            fig_e = heat_figure(he[-1], xe, ye, 0.0, zmax_e, height=360, title="Explicit Euler")
+            st.plotly_chart(fig_e, use_container_width=True, config={"displayModeBar": False})
         with g2:
-            st.caption("Crank-Nicolson (final state)")
-            fc = heatmap_fig(hc[-1], xc, yc, 0.0, max(1e-9, float(np.nanmax(hc[-1]))))
-            st.pyplot(fc)
-            plt.close(fc)
+            fig_c = heat_figure(
+                hc[-1], xc, yc, 0.0, max(1e-9, float(np.nanmax(hc[-1]))),
+                height=360, title="Crank-Nicolson",
+            )
+            st.plotly_chart(fig_c, use_container_width=True, config={"displayModeBar": False})
+
         if eul_max > 10:
-            st.error(
-                f"Explicit Euler has blown up (max value ≈ {eul_max:.1e}) while "
-                "Crank-Nicolson remains well-behaved."
+            st.warning(
+                f"Explicit Euler has diverged - its peak value reached roughly "
+                f"{eul_max:.0e}, while Crank-Nicolson stayed well-behaved."
             )
 
 
-# --------------------------------------------------------------------------
-# Tab 3 — Validation against the analytical solution
-# --------------------------------------------------------------------------
 with tab_valid:
-    st.subheader("Validation against the closed-form solution")
+    st.subheader("Checking the solver against an exact answer")
     st.markdown(
-        "For the $\\sin(\\pi x)\\sin(\\pi y)$ initial condition under zero-Dirichlet "
-        "boundaries, the heat equation has the exact solution "
-        "$u(x,y,t) = \\sin(\\pi x)\\sin(\\pi y)\\,e^{-\\alpha(2\\pi^2)t}$. "
-        "We compare the numerical result against it."
+        '<p class="lead">For one specific starting pattern the heat equation can be '
+        "solved exactly with pen and paper. Comparing the solver against that known "
+        "answer measures how accurate it really is.</p>",
+        unsafe_allow_html=True,
     )
-    vc1, vc2 = st.columns([1, 2])
-    with vc1:
-        alpha_v = st.slider("Diffusivity α", 0.001, 0.05, 0.01, 0.001, key="v_alpha")
-        nx_v = st.slider("Grid size", 30, 100, 60, 10, key="v_nx")
-        dt_v = st.select_slider(
-            "Time step Δt", options=[0.0005, 0.001, 0.002], value=0.002, key="v_dt"
-        )
+    st.write("")
+
+    left, right = st.columns([1, 1.9], gap="large")
+    with left:
+        alpha_v = st.slider("Diffusivity", 0.001, 0.05, 0.01, 0.001, format="%.3f", key="v_a")
+        help_note("How fast heat conducts in this test.")
+
+        nx_v = st.slider("Grid resolution", 30, 100, 60, 10, key="v_nx")
+        help_note("Finer grids should track the exact answer more closely.")
+
         t_v = st.slider("Total time", 0.05, 0.3, 0.1, 0.05, key="v_t")
+        help_note("How long to run before comparing.")
 
-    s = CrankNicolson2D(nx=nx_v, ny=nx_v, alpha=alpha_v, bc=BCConfig.dirichlet_all(0.0))
-    r = s.solve(ic_sin, dt=dt_v, t_total=t_v)
-    X, Y = np.meshgrid(r.grid_x, r.grid_y, indexing="ij")
-    exact = analytical_solution_sin(X, Y, t=t_v, alpha=alpha_v)
-    rel = relative_l2_error(r.u, exact)
+        u_num, exact, gxv, gyv, rel = run_validation(alpha_v, nx_v, 0.002, t_v)
+        st.markdown(
+            f'<p class="metric-mono" style="font-size:1.4rem;color:{INK};margin-top:1rem;">'
+            f"{rel * 100:.4f}%</p>"
+            '<p class="help-note">Average disagreement with the exact solution. '
+            "Below a fraction of a percent is excellent.</p>",
+            unsafe_allow_html=True,
+        )
 
-    with vc1:
-        st.metric("Relative L2 error", f"{rel * 100:.4f} %")
-
-    with vc2:
-        g1, g2 = st.columns(2)
-        vmax = max(1e-9, float(exact.max()))
+    with right:
+        zmax = max(1e-9, float(exact.max()))
+        g1, g2 = st.columns(2, gap="medium")
         with g1:
-            st.caption("Numerical (Crank-Nicolson)")
-            f1 = heatmap_fig(r.u, r.grid_x, r.grid_y, 0.0, vmax)
-            st.pyplot(f1)
-            plt.close(f1)
+            f1 = heat_figure(u_num, gxv, gyv, 0.0, zmax, height=320, title="Solver result")
+            st.plotly_chart(f1, use_container_width=True, config={"displayModeBar": False})
         with g2:
-            st.caption("Analytical (exact)")
-            f2 = heatmap_fig(exact, r.grid_x, r.grid_y, 0.0, vmax)
-            st.pyplot(f2)
-            plt.close(f2)
+            f2 = heat_figure(exact, gxv, gyv, 0.0, zmax, height=320, title="Exact solution")
+            st.plotly_chart(f2, use_container_width=True, config={"displayModeBar": False})
 
     st.divider()
-    st.subheader("Grid convergence")
-    grids, errors = run_convergence(alpha_v, dt_v, t_v)
-    fig, ax = plt.subplots(figsize=(7, 3.5))
-    ax.loglog(grids, errors, "o-")
-    ax.set_xlabel("Grid size (nx)")
-    ax.set_ylabel("L2 error")
-    ax.grid(True, which="both", ls="--", alpha=0.3)
-    fig.tight_layout()
-    st.pyplot(fig)
-    plt.close(fig)
+    st.subheader("Accuracy improves as the grid gets finer")
+    grids, errors = run_convergence(alpha_v, 0.002, t_v)
+    conv = go.Figure(
+        go.Scatter(
+            x=grids, y=errors, mode="lines+markers",
+            line=dict(color=ACCENT, width=2), marker=dict(size=8, color=ACCENT),
+            hovertemplate="grid %{x} x %{x}<br>error %{y:.2e}<extra></extra>",
+        )
+    )
+    conv.update_xaxes(title="Grid resolution (points per side)", type="log", gridcolor=GRID)
+    conv.update_yaxes(title="Error vs exact solution", type="log", gridcolor=GRID)
+    base_layout(conv, height=340)
+    st.plotly_chart(conv, use_container_width=True, config={"displayModeBar": False})
     if len(errors) >= 2:
         ratio = errors[0] / errors[1]
-        st.caption(
-            f"Error drops about {ratio:.1f}× when the grid doubles from "
-            f"{grids[0]} to {grids[1]} points — consistent with second-order "
-            "spatial accuracy."
+        st.markdown(
+            f'<p class="help-note">Both axes are logarithmic. The error falls by '
+            f"about {ratio:.1f} times when the grid resolution increases by 1.5x, "
+            "which is the hallmark of a second-order accurate method.</p>",
+            unsafe_allow_html=True,
         )
 
 
-# --------------------------------------------------------------------------
-# Tab 4 — Reaction-diffusion
-# --------------------------------------------------------------------------
 with tab_react:
-    st.subheader("Reaction-Diffusion: pattern formation")
+    st.subheader("Patterns from chemistry and diffusion")
     st.markdown(
-        "Strang operator splitting couples diffusion with nonlinear reaction. "
-        "**Gray-Scott** produces Turing patterns; **Fisher-KPP** produces "
-        "traveling fronts."
+        '<p class="lead">When diffusion is coupled to a chemical reaction, simple '
+        "rules can produce intricate patterns - the same mechanism behind animal "
+        "coat markings. Adjust the reaction rates to grow different structures.</p>",
+        unsafe_allow_html=True,
     )
-    rc1, rc2 = st.columns([1, 2])
-    with rc1:
-        reaction = st.selectbox("Model", ["Gray-Scott", "Fisher-KPP"], key="r_model")
-        nx_r = st.slider("Grid size", 60, 160, 120, 10, key="r_nx")
+    st.write("")
+
+    left, right = st.columns([1, 1.9], gap="large")
+    with left:
+        reaction = st.selectbox("Model", ["Gray-Scott", "Fisher-KPP"])
+        help_note(
+            "Gray-Scott produces spots, stripes and maze-like patterns. Fisher-KPP "
+            "produces a spreading wave front."
+        )
+
+        nx_r = st.slider("Grid resolution", 60, 160, 120, 10, key="r_nx")
+        help_note("Finer grids resolve smaller pattern features but compute slower.")
+
         if reaction == "Gray-Scott":
-            F = st.slider("Feed rate F", 0.02, 0.06, 0.037, 0.001, key="r_F")
-            k = st.slider("Kill rate k", 0.05, 0.07, 0.06, 0.001, key="r_k")
+            F = st.slider("Feed rate", 0.02, 0.06, 0.037, 0.001, format="%.3f")
+            help_note("How fast fresh chemical is supplied. Shifts the pattern type.")
+
+            k = st.slider("Removal rate", 0.05, 0.07, 0.06, 0.001, format="%.3f")
+            help_note(
+                "How fast product is removed. Small changes to feed and removal "
+                "switch between spots, stripes and labyrinths."
+            )
         else:
             F, k = 0.04, 0.06
+
         Du = st.select_slider(
-            "U diffusivity Dᵤ",
-            options=[1e-5, 1.6e-5, 2e-5, 3e-5],
-            value=2e-5,
-            key="r_Du",
+            "Spread rate", options=[1e-5, 1.6e-5, 2e-5, 3e-5], value=2e-5,
+            format_func=lambda v: f"{v:.0e}",
         )
-        Dv = Du / 2
-        t_r = st.slider("Total time", 1000, 12000, 8000, 500, key="r_t")
-        dt_r = st.select_slider("Time step Δt", options=[0.5, 1.0, 2.0], value=1.0, key="r_dt")
+        help_note("How quickly the chemicals diffuse. Sets the overall pattern scale.")
 
-    field, gx, gy, cfl_r = run_reaction(reaction, nx_r, F, k, Du, Dv, t_r, dt_r)
+        t_r = st.slider("Total time", 1000, 12000, 8000, 500)
+        help_note("How long to let the pattern develop. Longer runs are more intricate.")
 
-    if cfl_r > 0.5:
-        st.warning(
-            f"Diffusion CFL number = {cfl_r:.3f} > 0.5. The explicit diffusion "
-            "sub-step is unstable — reduce Δt or the diffusivity."
+    field, gxr, gyr, cfl_r = run_reaction(reaction, nx_r, F, k, Du, Du / 2, t_r, 1.0)
+
+    with right:
+        scale = "Inferno" if reaction == "Gray-Scott" else "Viridis"
+        fig = heat_figure(
+            field, gxr, gyr,
+            float(np.nanmin(field)), float(np.nanmax(field)),
+            colorscale=scale, height=520,
         )
-
-    with rc2:
-        cmap = "magma" if reaction == "Gray-Scott" else "viridis"
-        label = "V concentration" if reaction == "Gray-Scott" else "u"
-        fig = heatmap_fig(
-            field, gx, gy,
-            vmin=float(np.nanmin(field)), vmax=float(np.nanmax(field)),
-            cmap=cmap, title=f"{reaction} — {label}",
-        )
-        st.pyplot(fig)
-        plt.close(fig)
-    st.caption(
-        "Gray-Scott tip: small changes in F and k move you across the parameter "
-        "map between spots, stripes, and labyrinths."
-    )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        if cfl_r > 0.5:
+            st.warning(
+                f"This combination is unstable (stability number {cfl_r:.2f}). "
+                "Lower the spread rate."
+            )
 
 
-# --------------------------------------------------------------------------
-# Tab 5 — About
-# --------------------------------------------------------------------------
 with tab_about:
     st.subheader("About this project")
     st.markdown(
         """
-This is a from-scratch 2D PDE solver built around the heat equation and
-reaction-diffusion systems.
+This is a from-scratch numerical solver for the two-dimensional heat equation
+and reaction-diffusion systems, written in NumPy and SciPy.
 
-**Numerical methods**
-- Second-order central differences in space.
-- **Explicit Euler (FTCS):** conditionally stable, requires rx + ry ≤ 0.5 (the CFL condition).
-- **Crank-Nicolson:** implicit trapezoidal time-stepping, unconditionally stable,
-  second-order in both space and time. Boundary conditions (Dirichlet, Neumann
-  via the ghost-node method, periodic) are encoded directly in the sparse system
-  matrix and solved with `scipy.sparse`.
-- **Reaction-diffusion:** Strang operator splitting (half diffusion → full
-  reaction → half diffusion) for Fisher-KPP and Gray-Scott.
+**Numerical methods.** Space is discretised with second-order central
+differences. Two time-stepping schemes are implemented: Explicit Euler, which is
+simple but only stable below a step-size limit (the CFL condition), and
+Crank-Nicolson, an implicit scheme that is stable at any step size and
+second-order accurate in both space and time. Its boundary conditions - fixed,
+insulated, and periodic - are built directly into the sparse linear system that
+is solved at each step.
 
-**Validation**
-- Crank-Nicolson agrees with the analytical solution to ~0.0007% relative L2
-  error on a 50×50 grid.
-- Grid convergence confirms second-order spatial accuracy.
-- An insulated (all-Neumann) box conserves total heat to round-off.
+**Validation.** The Crank-Nicolson solver agrees with the exact analytical
+solution to roughly 0.0007% on a 50x50 grid, and a grid-refinement study
+confirms the expected second-order accuracy. In a fully insulated domain the
+total heat is conserved to numerical round-off.
 
-**Tested:** 30 unit and integration tests.
+**Reaction-diffusion.** The Fisher-KPP and Gray-Scott systems are integrated
+using Strang operator splitting, alternating diffusion and reaction sub-steps.
+
+The full source, test suite, and documentation are in the project repository.
         """
     )
-    st.caption("Source code and full README are in the GitHub repository.")
