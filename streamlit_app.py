@@ -100,7 +100,17 @@ def ic_gaussian(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     return np.exp(-((X - 0.5) ** 2 + (Y - 0.5) ** 2) / (2 * 0.1**2))
 
 
-IC_MAP = {"Smooth sine bump": ic_sin, "Gaussian hot spot": ic_gaussian}
+def ic_noisy(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+    # High-frequency content: this is what reveals Explicit Euler's instability.
+    rng = np.random.default_rng(1)
+    return 0.5 + 0.5 * rng.random(X.shape)
+
+
+IC_MAP = {
+    "Smooth sine bump": ic_sin,
+    "Gaussian hot spot": ic_gaussian,
+    "Random noise": ic_noisy,
+}
 
 
 @st.cache_data(show_spinner=False)
@@ -113,7 +123,9 @@ def run_heat(solver_name, nx, alpha, dt, t_total, ic_name, bc_name, bc_val):
     )
     cls = ExplicitEuler2D if solver_name == "Explicit Euler" else CrankNicolson2D
     solver = cls(nx=nx, ny=nx, alpha=alpha, bc=bc)
-    result = solver.solve(ic, dt=dt, t_total=t_total, record_every=2)
+    n_steps = max(1, int(np.ceil(t_total / dt)))
+    record_every = max(1, n_steps // 80)  # ~80 stored frames keeps animation smooth
+    result = solver.solve(ic, dt=dt, t_total=t_total, record_every=record_every)
     rx = alpha * dt / solver.dx**2
     return (
         np.array(result.u_history),
@@ -179,9 +191,20 @@ def heat_figure(u, x, y, zmin, zmax, colorscale=HEAT_SCALE, height=440, title=No
             hovertemplate="x=%{x:.2f}, y=%{y:.2f}<br>value=%{z:.3f}<extra></extra>",
         )
     )
-    fig.update_xaxes(title="x", showgrid=False, constrain="domain")
-    fig.update_yaxes(title="y", showgrid=False, scaleanchor="x", scaleratio=1)
-    return base_layout(fig, height=height, title=title)
+    # fixedrange disables zoom/pan so a stray click can't get the view stuck.
+    fig.update_xaxes(
+        title="x", showgrid=False, constrain="domain", fixedrange=True
+    )
+    fig.update_yaxes(
+        title="y", showgrid=False, scaleanchor="x", scaleratio=1, fixedrange=True
+    )
+    fig = base_layout(fig, height=height, title=title)
+    fig.update_layout(dragmode=False)
+    return fig
+
+
+# Plotly config shared by every chart: no mode bar, no zoom-stuck, no scroll-zoom.
+CHART_CONFIG = {"displayModeBar": False, "staticPlot": False, "scrollZoom": False}
 
 
 st.title("2D Heat & Reaction-Diffusion Solver")
@@ -251,8 +274,14 @@ with tab_heat:
             "but take longer to compute."
         )
 
+    # Choose the animation time step so Explicit Euler stays stable (CFL <= 0.4)
+    # while Crank-Nicolson, stable at any step, still solves quickly. This keeps
+    # the heat-flow tab responsive without ever showing a diverged Euler field.
+    dx = 1.0 / (nx - 1)
+    euler_safe_dt = 0.4 * dx**2 / (2 * alpha)
+    anim_dt = min(0.005, euler_safe_dt) if solver_name == "Explicit Euler" else 0.005
     hist, times, gx, gy, cfl = run_heat(
-        solver_name, nx, alpha, 0.001, 0.4, ic_name, bc_name, bc_val
+        solver_name, nx, alpha, anim_dt, 0.4, ic_name, bc_name, bc_val
     )
 
     with right:
@@ -286,17 +315,20 @@ with tab_heat:
 with tab_compare:
     st.subheader("Why the choice of scheme matters")
     st.markdown(
-        '<p class="lead">Both schemes solve the same equation and agree when the '
-        "time step is small. But push the time step too large and the simpler "
-        "Explicit Euler scheme becomes unstable and blows up, while Crank-Nicolson "
-        "stays accurate. This is the central reason to use an implicit method.</p>",
+        '<p class="lead">Both schemes solve the same equation. Starting from a '
+        "rough, noisy temperature field, the simpler Explicit Euler scheme stays "
+        "stable only while the stability number is at or below 0.50 - push the time "
+        "step past that and it blows up into garbage, while Crank-Nicolson smooths "
+        "the noise away correctly. This is the central reason to use an implicit "
+        "scheme. The default settings are already past the limit; lower the time "
+        "step to make Euler behave again.</p>",
         unsafe_allow_html=True,
     )
     st.write("")
 
     left, right = st.columns([1, 1.9], gap="large")
     with left:
-        alpha_c = st.slider("Diffusivity", 0.001, 0.1, 0.01, 0.001, format="%.3f", key="c_a")
+        alpha_c = st.slider("Diffusivity", 0.001, 0.1, 0.02, 0.001, format="%.3f", key="c_a")
         help_note("How fast heat conducts. Affects the stability threshold below.")
 
         nx_c = st.slider("Grid resolution", 20, 80, 40, 5, key="c_nx")
@@ -305,15 +337,15 @@ with tab_compare:
         dt_c = st.select_slider(
             "Time step size",
             options=[0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.03],
-            value=0.001, key="c_dt",
+            value=0.01, key="c_dt",
         )
         help_note(
             "How far each step jumps forward in time. Larger is faster but riskier "
-            "for Explicit Euler. Increase it and watch the left panel break."
+            "for Explicit Euler. Slide it up to 0.02 or beyond and watch Euler break."
         )
 
-        t_c = st.slider("Total time", 0.02, 0.3, 0.05, 0.01, key="c_t")
-        help_note("How long to simulate in total.")
+        t_c = st.slider("Total time", 0.02, 0.3, 0.15, 0.01, key="c_t")
+        help_note("How long to simulate in total. Longer runs let instability grow.")
 
         dx_c = 1.0 / (nx_c - 1)
         cfl_c = 2 * alpha_c * dt_c / dx_c**2
@@ -330,32 +362,49 @@ with tab_compare:
         )
 
     he, _, xe, ye, _ = run_heat(
-        "Explicit Euler", nx_c, alpha_c, dt_c, t_c, "Smooth sine bump",
+        "Explicit Euler", nx_c, alpha_c, dt_c, t_c, "Random noise",
         "Fixed edges (Dirichlet)", 0.0,
     )
     hc, _, xc, yc, _ = run_heat(
-        "Crank-Nicolson", nx_c, alpha_c, dt_c, t_c, "Smooth sine bump",
+        "Crank-Nicolson", nx_c, alpha_c, dt_c, t_c, "Random noise",
         "Fixed edges (Dirichlet)", 0.0,
     )
 
     with right:
         eul_max = float(np.nanmax(np.abs(he[-1])))
-        zmax_e = 1.0 if eul_max > 10 else max(1e-9, eul_max)
+        diverged = eul_max > 10
+        # Both panels share one color scale so genuine magnitude differences are
+        # visible rather than hidden by independent rescaling.
+        shared_max = 1.0 if diverged else max(1e-9, float(np.nanmax(hc[-1])))
         g1, g2 = st.columns(2, gap="medium")
         with g1:
-            fig_e = heat_figure(he[-1], xe, ye, 0.0, zmax_e, height=360, title="Explicit Euler")
-            st.plotly_chart(fig_e, use_container_width=True, config={"displayModeBar": False})
+            fig_e = heat_figure(he[-1], xe, ye, 0.0, shared_max, height=320, title="Explicit Euler")
+            st.plotly_chart(fig_e, use_container_width=True, config=CHART_CONFIG)
         with g2:
-            fig_c = heat_figure(
-                hc[-1], xc, yc, 0.0, max(1e-9, float(np.nanmax(hc[-1]))),
-                height=360, title="Crank-Nicolson",
-            )
-            st.plotly_chart(fig_c, use_container_width=True, config={"displayModeBar": False})
+            fig_c = heat_figure(hc[-1], xc, yc, 0.0, shared_max, height=320, title="Crank-Nicolson")
+            st.plotly_chart(fig_c, use_container_width=True, config=CHART_CONFIG)
 
-        if eul_max > 10:
+        if diverged:
             st.warning(
                 f"Explicit Euler has diverged - its peak value reached roughly "
                 f"{eul_max:.0e}, while Crank-Nicolson stayed well-behaved."
+            )
+        else:
+            # When both are stable they look alike, so show where they differ.
+            diff = np.abs(he[-1] - hc[-1])
+            max_diff = float(np.nanmax(diff))
+            fig_d = heat_figure(
+                diff, xe, ye, 0.0, max(1e-9, max_diff),
+                colorscale="Hot", height=300,
+                title=f"Difference between the two (peak {max_diff:.1e})",
+            )
+            st.plotly_chart(fig_d, use_container_width=True, config=CHART_CONFIG)
+            st.markdown(
+                '<p class="help-note">At small time steps the two schemes nearly '
+                "agree, so the difference is tiny - that is the point. Increase the "
+                "time step and the difference grows, then Explicit Euler diverges "
+                "entirely.</p>",
+                unsafe_allow_html=True,
             )
 
 
@@ -393,11 +442,29 @@ with tab_valid:
         zmax = max(1e-9, float(exact.max()))
         g1, g2 = st.columns(2, gap="medium")
         with g1:
-            f1 = heat_figure(u_num, gxv, gyv, 0.0, zmax, height=320, title="Solver result")
-            st.plotly_chart(f1, use_container_width=True, config={"displayModeBar": False})
+            f1 = heat_figure(u_num, gxv, gyv, 0.0, zmax, height=360, title="Solver result")
+            st.plotly_chart(f1, use_container_width=True, config=CHART_CONFIG)
         with g2:
-            f2 = heat_figure(exact, gxv, gyv, 0.0, zmax, height=320, title="Exact solution")
-            st.plotly_chart(f2, use_container_width=True, config={"displayModeBar": False})
+            f2 = heat_figure(exact, gxv, gyv, 0.0, zmax, height=360, title="Exact solution")
+            st.plotly_chart(f2, use_container_width=True, config=CHART_CONFIG)
+
+        # The two panels look identical because the solver is accurate; the
+        # error map below is where the (tiny) disagreement is actually visible.
+        err_map = np.abs(u_num - exact)
+        peak = float(np.nanmax(err_map))
+        f3 = heat_figure(
+            err_map, gxv, gyv, 0.0, max(1e-9, peak),
+            colorscale="Hot", height=300,
+            title=f"Error map (peak {peak:.1e})",
+        )
+        st.plotly_chart(f3, use_container_width=True, config=CHART_CONFIG)
+        st.markdown(
+            '<p class="help-note">The first two panels look the same because the '
+            "solver is accurate. The error map magnifies the difference: it is "
+            "largest where the solution curves most, and shrinks as the grid is "
+            "refined.</p>",
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     st.subheader("Accuracy improves as the grid gets finer")
@@ -405,20 +472,22 @@ with tab_valid:
     conv = go.Figure(
         go.Scatter(
             x=grids, y=errors, mode="lines+markers",
-            line=dict(color=ACCENT, width=2), marker=dict(size=8, color=ACCENT),
+            line=dict(color=ACCENT, width=2.5),
+            marker=dict(size=9, color=ACCENT),
             hovertemplate="grid %{x} x %{x}<br>error %{y:.2e}<extra></extra>",
         )
     )
     conv.update_xaxes(
         title="Grid resolution (points per side)", type="log",
-        gridcolor="rgba(128,128,128,0.15)",
+        gridcolor="rgba(128,128,128,0.15)", fixedrange=True,
     )
     conv.update_yaxes(
         title="Error vs exact solution", type="log",
-        gridcolor="rgba(128,128,128,0.15)",
+        gridcolor="rgba(128,128,128,0.15)", fixedrange=True,
     )
-    base_layout(conv, height=340)
-    st.plotly_chart(conv, use_container_width=True, config={"displayModeBar": False})
+    base_layout(conv, height=420)
+    conv.update_layout(dragmode=False)
+    st.plotly_chart(conv, use_container_width=True, config=CHART_CONFIG)
     if len(errors) >= 2:
         ratio = errors[0] / errors[1]
         st.markdown(
