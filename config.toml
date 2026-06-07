@@ -1,0 +1,7 @@
+[theme]
+# No "base" is set, so the app follows the viewer's light/dark preference.
+# Only the accent color is pinned; text and background come from the theme.
+primaryColor = "#c2410c"
+
+[server]
+headless = true
