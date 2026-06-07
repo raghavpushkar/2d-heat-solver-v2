@@ -24,44 +24,59 @@ st.set_page_config(
 )
 
 # --------------------------------------------------------------------------
-# Styling - restrained scientific/editorial look
+# Styling - theme-aware (works in both light and dark mode)
 # --------------------------------------------------------------------------
 st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
-    html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+    :root { --accent: #c2410c; }
+
+    html, body, [class*="css"], .stMarkdown, p, span, label, div {
+        font-family: 'IBM Plex Sans', sans-serif;
+    }
 
     .main .block-container {
-        max-width: 1180px;
-        padding-top: 2.2rem;
+        max-width: 1160px;
+        padding-top: 1.2rem;
         padding-bottom: 3rem;
     }
 
-    h1, h2, h3 { font-family: 'Source Serif 4', serif; letter-spacing: -0.01em; }
-    h1 { font-weight: 600; font-size: 2.1rem; color: #1a1a1a; }
-    h2 { font-weight: 600; font-size: 1.35rem; color: #1a1a1a; margin-top: 0.5rem; }
-    h3 { font-weight: 600; font-size: 1.08rem; color: #2a2a2a; }
+    /* Headings inherit the theme text color so they read in both modes */
+    h1, h2, h3 {
+        font-family: 'Source Serif 4', serif;
+        letter-spacing: -0.01em;
+        color: inherit;
+    }
+    h1 { font-weight: 600; font-size: 1.95rem; }
+    h2 { font-weight: 600; font-size: 1.3rem; margin-top: 0.4rem; }
+    h3 { font-weight: 600; font-size: 1.05rem; }
 
-    .stTabs [data-baseweb="tab-list"] { gap: 1.6rem; border-bottom: 1px solid #e6e6e6; }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1.5rem;
+        border-bottom: 1px solid rgba(128,128,128,0.25);
+    }
     .stTabs [data-baseweb="tab"] {
-        font-size: 0.95rem; font-weight: 500; color: #6b6b6b;
+        font-size: 0.95rem; font-weight: 500;
         padding: 0.4rem 0; background: transparent;
+        opacity: 0.65;
     }
-    .stTabs [aria-selected="true"] { color: #b5341a; }
-    .stTabs [data-baseweb="tab-highlight"] { background-color: #b5341a; }
+    .stTabs [aria-selected="true"] { opacity: 1; color: var(--accent); }
+    .stTabs [data-baseweb="tab-highlight"] { background-color: var(--accent); }
 
+    /* Lead paragraph and help notes use the theme text color at reduced opacity
+       so they stay readable on light OR dark backgrounds */
+    .lead {
+        font-size: 0.97rem; line-height: 1.55; max-width: 72ch;
+        color: inherit; opacity: 0.82;
+    }
     .help-note {
-        font-size: 0.8rem; color: #8a8a8a; line-height: 1.35;
-        margin: -0.4rem 0 0.9rem 0; font-family: 'IBM Plex Sans', sans-serif;
+        font-size: 0.8rem; line-height: 1.4;
+        margin: -0.3rem 0 1rem 0;
+        color: inherit; opacity: 0.55;
     }
-
-    .lead { font-size: 0.98rem; color: #444; line-height: 1.55; max-width: 70ch; }
-
     .metric-mono { font-family: 'IBM Plex Mono', monospace; }
-
-    hr { border-color: #ececec; }
 
     #MainMenu, footer { visibility: hidden; }
     </style>
@@ -69,9 +84,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ACCENT = "#b5341a"
-GRID = "#ececec"
-INK = "#1a1a1a"
+ACCENT = "#c2410c"
 HEAT_SCALE = "Inferno"
 PLOT_FONT = "IBM Plex Sans, sans-serif"
 
@@ -169,13 +182,23 @@ def run_reaction(reaction, nx, F, k, Du, Dv, t_total, dt):
 
 
 def base_layout(fig, height=440, title=None):
+    # Transparent backgrounds let the chart sit on whatever theme the page uses;
+    # a mid-grey font and gridline read acceptably on both light and dark.
     fig.update_layout(
         height=height,
         margin=dict(l=10, r=10, t=40 if title else 16, b=10),
-        font=dict(family=PLOT_FONT, size=13, color=INK),
-        paper_bgcolor="white",
-        plot_bgcolor="white",
+        font=dict(family=PLOT_FONT, size=13, color="#808080"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         title=dict(text=title, font=dict(size=15)) if title else None,
+    )
+    fig.update_xaxes(
+        showline=True, linecolor="rgba(128,128,128,0.4)",
+        zeroline=False, tickfont=dict(color="#808080"),
+    )
+    fig.update_yaxes(
+        showline=True, linecolor="rgba(128,128,128,0.4)",
+        zeroline=False, tickfont=dict(color="#808080"),
     )
     return fig
 
@@ -184,7 +207,10 @@ def heat_figure(u, x, y, zmin, zmax, colorscale=HEAT_SCALE, height=440, title=No
     fig = go.Figure(
         go.Heatmap(
             z=u.T, x=x, y=y, zmin=zmin, zmax=zmax, colorscale=colorscale,
-            colorbar=dict(thickness=12, outlinewidth=0, len=0.9),
+            colorbar=dict(
+                thickness=12, outlinewidth=0, len=0.9,
+                tickfont=dict(color="#808080"),
+            ),
             hovertemplate="x=%{x:.2f}, y=%{y:.2f}<br>value=%{z:.3f}<extra></extra>",
         )
     )
@@ -391,7 +417,7 @@ with tab_valid:
 
         u_num, exact, gxv, gyv, rel = run_validation(alpha_v, nx_v, 0.002, t_v)
         st.markdown(
-            f'<p class="metric-mono" style="font-size:1.4rem;color:{INK};margin-top:1rem;">'
+            f'<p class="metric-mono" style="font-size:1.4rem;color:{ACCENT};margin-top:1rem;">'
             f"{rel * 100:.4f}%</p>"
             '<p class="help-note">Average disagreement with the exact solution. '
             "Below a fraction of a percent is excellent.</p>",
@@ -418,8 +444,14 @@ with tab_valid:
             hovertemplate="grid %{x} x %{x}<br>error %{y:.2e}<extra></extra>",
         )
     )
-    conv.update_xaxes(title="Grid resolution (points per side)", type="log", gridcolor=GRID)
-    conv.update_yaxes(title="Error vs exact solution", type="log", gridcolor=GRID)
+    conv.update_xaxes(
+        title="Grid resolution (points per side)", type="log",
+        gridcolor="rgba(128,128,128,0.15)",
+    )
+    conv.update_yaxes(
+        title="Error vs exact solution", type="log",
+        gridcolor="rgba(128,128,128,0.15)",
+    )
     base_layout(conv, height=340)
     st.plotly_chart(conv, use_container_width=True, config={"displayModeBar": False})
     if len(errors) >= 2:
