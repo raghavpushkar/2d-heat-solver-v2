@@ -373,6 +373,7 @@ with tab_compare:
     with right:
         eul_max = float(np.nanmax(np.abs(he[-1])))
         diverged = eul_max > 10
+        over_limit = cfl_c > 0.5
         # Both panels share one color scale so genuine magnitude differences are
         # visible rather than hidden by independent rescaling.
         shared_max = 1.0 if diverged else max(1e-9, float(np.nanmax(hc[-1])))
@@ -384,26 +385,46 @@ with tab_compare:
             fig_c = heat_figure(hc[-1], xc, yc, 0.0, shared_max, height=320, title="Crank-Nicolson")
             st.plotly_chart(fig_c, use_container_width=True, config=CHART_CONFIG)
 
+        diff = np.abs(he[-1] - hc[-1])
+        max_diff = float(np.nanmax(diff))
+
         if diverged:
+            # Regime 1: Euler has blown up. State it plainly.
+            st.error(
+                f"Explicit Euler has diverged — its peak value reached about "
+                f"{eul_max:.0e}, pure numerical garbage, while Crank-Nicolson stayed "
+                "well-behaved. This is exactly the failure the stability limit warns "
+                "about. Lower the time step to bring Euler back."
+            )
+        elif over_limit:
+            # Regime 2: past the limit but instability hasn't grown visibly yet.
             st.warning(
-                f"Explicit Euler has diverged - its peak value reached roughly "
-                f"{eul_max:.0e}, while Crank-Nicolson stayed well-behaved."
+                f"The stability number is {cfl_c:.2f}, above the 0.50 limit, so "
+                "Explicit Euler is formally unstable here — the error is growing but "
+                "has not yet blown up over this run. Increase the total time and "
+                "watch it erupt, or raise the time step further to trigger it faster."
             )
         else:
-            # When both are stable they look alike, so show where they differ.
-            diff = np.abs(he[-1] - hc[-1])
-            max_diff = float(np.nanmax(diff))
+            # Regime 3: stable. Explain WHY the panels match, so an identical-looking
+            # pair reads as a correct result rather than a broken tab.
+            st.info(
+                f"The stability number is {cfl_c:.2f}, comfortably below the 0.50 "
+                "limit, so both schemes are stable and agree closely — that is why "
+                "the two panels look the same. This is the safe regime. To see the "
+                "schemes part ways, raise the time step (and total time) until the "
+                "stability number climbs above 0.50."
+            )
             fig_d = heat_figure(
                 diff, xe, ye, 0.0, max(1e-9, max_diff),
                 colorscale="Hot", height=300,
-                title=f"Difference between the two (peak {max_diff:.1e})",
+                title=f"Where they disagree (peak {max_diff:.1e})",
             )
             st.plotly_chart(fig_d, use_container_width=True, config=CHART_CONFIG)
             st.markdown(
-                '<p class="help-note">At small time steps the two schemes nearly '
-                "agree, so the difference is tiny - that is the point. Increase the "
-                "time step and the difference grows, then Explicit Euler diverges "
-                "entirely.</p>",
+                '<p class="help-note">The tiny remaining difference concentrates '
+                "near the fixed edges, where the solution bends most sharply and the "
+                "two schemes approximate it slightly differently. It shrinks as the "
+                "time step shrinks.</p>",
                 unsafe_allow_html=True,
             )
 
