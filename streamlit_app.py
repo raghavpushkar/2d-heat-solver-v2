@@ -15,7 +15,6 @@ import streamlit as st
 
 from src.analytics import analytical_solution_sin, l2_error, relative_l2_error
 from src.boundary import BCConfig
-from src.reaction import ReactionDiffusionSolver, ReactionType
 from src.solvers import CrankNicolson2D, ExplicitEuler2D
 
 st.set_page_config(
@@ -85,7 +84,7 @@ st.markdown(
 )
 
 ACCENT = "#c2410c"
-HEAT_SCALE = "Inferno"
+HEAT_SCALE = "Viridis"
 PLOT_FONT = "IBM Plex Sans, sans-serif"
 
 
@@ -147,40 +146,6 @@ def run_validation(alpha, nx, dt, t_total):
     return r.u, exact, r.grid_x, r.grid_y, relative_l2_error(r.u, exact)
 
 
-@st.cache_data(show_spinner=False)
-def run_reaction(reaction, nx, F, k, Du, Dv, t_total, dt):
-    length = 2.5
-    np.random.seed(0)
-
-    def ic_u(X, Y):
-        u = np.ones_like(X)
-        c = (np.abs(X - length / 2) < 0.08) & (np.abs(Y - length / 2) < 0.08)
-        u[c] = 0.5
-        return u + 0.01 * np.random.random(X.shape)
-
-    def ic_v(X, Y):
-        v = np.zeros_like(X)
-        c = (np.abs(X - length / 2) < 0.08) & (np.abs(Y - length / 2) < 0.08)
-        v[c] = 0.25
-        return v + 0.01 * np.random.random(X.shape)
-
-    rtype = (
-        ReactionType.GRAY_SCOTT if reaction == "Gray-Scott" else ReactionType.FISHER_KPP
-    )
-    solver = ReactionDiffusionSolver(
-        nx=nx, ny=nx, Lx=length, Ly=length, reaction_type=rtype,
-        F=F, k=k, Du=Du, Dv=Dv, D=Du, r=1.0,
-    )
-    result = solver.solve(
-        ic_u, t_total=t_total, dt=dt,
-        ic_func_v=ic_v if rtype == ReactionType.GRAY_SCOTT else None,
-        record_every=max(1, int(t_total / dt) // 60),
-    )
-    field = result.v if result.v is not None else result.u
-    dx = length / (nx - 1)
-    return field, result.grid_x, result.grid_y, 2 * Du * (dt / 2) / dx**2
-
-
 def base_layout(fig, height=440, title=None):
     # Transparent backgrounds let the chart sit on whatever theme the page uses;
     # a mid-grey font and gridline read acceptably on both light and dark.
@@ -230,8 +195,8 @@ st.markdown(
 )
 st.write("")
 
-tab_heat, tab_compare, tab_valid, tab_react, tab_about = st.tabs(
-    ["Heat flow", "Method comparison", "Validation", "Pattern formation", "About"]
+tab_heat, tab_compare, tab_valid, tab_about = st.tabs(
+    ["Heat flow", "Method comparison", "Validation", "About"]
 )
 
 
@@ -464,65 +429,6 @@ with tab_valid:
         )
 
 
-with tab_react:
-    st.subheader("Patterns from chemistry and diffusion")
-    st.markdown(
-        '<p class="lead">When diffusion is coupled to a chemical reaction, simple '
-        "rules can produce intricate patterns - the same mechanism behind animal "
-        "coat markings. Adjust the reaction rates to grow different structures.</p>",
-        unsafe_allow_html=True,
-    )
-    st.write("")
-
-    left, right = st.columns([1, 1.9], gap="large")
-    with left:
-        reaction = st.selectbox("Model", ["Gray-Scott", "Fisher-KPP"])
-        help_note(
-            "Gray-Scott produces spots, stripes and maze-like patterns. Fisher-KPP "
-            "produces a spreading wave front."
-        )
-
-        nx_r = st.slider("Grid resolution", 60, 160, 120, 10, key="r_nx")
-        help_note("Finer grids resolve smaller pattern features but compute slower.")
-
-        if reaction == "Gray-Scott":
-            F = st.slider("Feed rate", 0.02, 0.06, 0.037, 0.001, format="%.3f")
-            help_note("How fast fresh chemical is supplied. Shifts the pattern type.")
-
-            k = st.slider("Removal rate", 0.05, 0.07, 0.06, 0.001, format="%.3f")
-            help_note(
-                "How fast product is removed. Small changes to feed and removal "
-                "switch between spots, stripes and labyrinths."
-            )
-        else:
-            F, k = 0.04, 0.06
-
-        Du = st.select_slider(
-            "Spread rate", options=[1e-5, 1.6e-5, 2e-5, 3e-5], value=2e-5,
-            format_func=lambda v: f"{v:.0e}",
-        )
-        help_note("How quickly the chemicals diffuse. Sets the overall pattern scale.")
-
-        t_r = st.slider("Total time", 1000, 12000, 8000, 500)
-        help_note("How long to let the pattern develop. Longer runs are more intricate.")
-
-    field, gxr, gyr, cfl_r = run_reaction(reaction, nx_r, F, k, Du, Du / 2, t_r, 1.0)
-
-    with right:
-        scale = "Inferno" if reaction == "Gray-Scott" else "Viridis"
-        fig = heat_figure(
-            field, gxr, gyr,
-            float(np.nanmin(field)), float(np.nanmax(field)),
-            colorscale=scale, height=520,
-        )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        if cfl_r > 0.5:
-            st.warning(
-                f"This combination is unstable (stability number {cfl_r:.2f}). "
-                "Lower the spread rate."
-            )
-
-
 with tab_about:
     st.subheader("About this project")
     st.markdown(
@@ -542,9 +448,6 @@ is solved at each step.
 solution to roughly 0.0007% on a 50x50 grid, and a grid-refinement study
 confirms the expected second-order accuracy. In a fully insulated domain the
 total heat is conserved to numerical round-off.
-
-**Reaction-diffusion.** The Fisher-KPP and Gray-Scott systems are integrated
-using Strang operator splitting, alternating diffusion and reaction sub-steps.
 
 The full source, test suite, and documentation are in the project repository.
         """
